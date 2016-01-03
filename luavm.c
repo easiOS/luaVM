@@ -3,7 +3,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
-#include <byteswap.h>
+#include <math.h>
 #include "luavm.h"
 #ifdef __linux__ //we don't have these headers on easiOS
 #include <sys/types.h>
@@ -81,7 +81,7 @@ void luavm_loadfile(const char* fn)
   fread(luacfile, finfo.st_size, 1, f);
   fclose(f);
   lheader_t* header = (lheader_t*)luacfile;
-  const char* sgn = LUA_SIGNATURE;
+  const char* sgn = "\33Lua";
   if(memcmp(header->signature, &sgn, 4) == 0)
   {
     luavm_fat("file not lua bytecode (0x%x)", header->signature);
@@ -103,8 +103,8 @@ void luavm_exec(luavm_state* state, uint32_t instruction);
 
 #define LUAVM_OPCODE(instruction) instruction & 0x3F
 #define LUAVM_A(instruction) instruction >> 6 & 0xFF
-#define LUAVM_B(instruction) instruction >> 23
-#define LUAVM_C(instruction) instruction >> 18 & 0x3FFF
+#define LUAVM_B(instruction) instruction >> 23 & 0x1FF
+#define LUAVM_C(instruction) instruction >> 14 & 0x1FF
 #define LUAVM_Bx(instruction) instruction >> 14
 #define LUAVM_sBx(instruction) LUAVM_Bx(instruction)
 
@@ -117,7 +117,7 @@ void luavm_update(uint64_t dt, ep_window* w)
 {
   if(!(w->flags >> 1 & 1)) return;
   luavm_state* s = (luavm_state*)w->userdata[0];
-  Instruction* instr = (Instruction*)((uint32_t)s->code_ptr + s->ip);
+  uint32_t* instr = (uint32_t*)((uint32_t)s->code_ptr + s->ip);
   for(int i = 0; i < dt && ((w->flags >> 1) & 1); i++)
   {
     if(s->ip + i >= s->code_n)
@@ -134,10 +134,10 @@ void luavm_update(uint64_t dt, ep_window* w)
 void luavm_spawn(lheader_t* f) //spawn a luavm and it's window
 {
   #define CHECK(byte, shouldbe, errmsg) if(byte != shouldbe) {luavm_fat(errmsg "(%d)", byte); return;}
-  const char* sgn = LUA_SIGNATURE;
+  const char* sgn = "\033Lua";
   if(memcmp(f->signature, &sgn, 4) == 0)
   {
-    luavm_fat("not lua bytecode (sign: %.4s, should be: %.4s)", f->signature, LUA_SIGNATURE);
+    luavm_fat("not lua bytecode (sign: %.4s, should be: %.4s)", f->signature, sgn);
     return;
   }
   /*if(f->ver != 0x51)
@@ -206,6 +206,7 @@ void luavm_spawn(lheader_t* f) //spawn a luavm and it's window
         kptr += 9;
         break;
       case 3:
+        //memcpy(&(vm_state->constants[i].data), kptr + 1, 8);
         vm_state->constants[i].data = *(uint64_t*)(kptr+1);
         luavm_inf("constant #%d: %f (Number)", i, vm_state->constants[i].data);
         kptr += 9;
@@ -217,7 +218,7 @@ void luavm_spawn(lheader_t* f) //spawn a luavm and it's window
         kptr += len + 5;
         break;
       default:
-        luavm_err("unknown constant #%d with value %d", i, vm_state->constants[i].type);
+        luavm_err("unknown constant #%d with value 0x%x", i, vm_state->constants[i].data);
         break;
     }
   }
@@ -243,7 +244,7 @@ void luavm_spawn(lheader_t* f) //spawn a luavm and it's window
 
   func_skip:*/
   //printf("Code n: %d\t@: 0x%x\nConst n: %d\t@: 0x%x\nFprot n: %d\t @:\n", vm_state->code_n, vm_state->code_ptr, vm_state->const_n, vm_state->const_ptr, vm_state->fprot_n);
-  memset(vm_state->stack, 0, MAXSTACK * 4);
+  memset(vm_state->stack, 0, 200 * 4);
   w->flags |= 1 << 1;
   w->update = &luavm_update;
   eelphant_switch_active(w);
@@ -256,30 +257,75 @@ void luavm_exec(luavm_state* state, uint32_t instruction)
   uint16_t b = LUAVM_B(instruction);
   uint16_t c = LUAVM_C(instruction);
   uint32_t bx = LUAVM_Bx(instruction);
-  printf("------  %d  -----------\n", instruction);
+  double ra = 0.0, rb = 0.0, rc = 0.0;
+  double* regs = (double*)state->registers;
   switch(opcode)
   {
     //case OP_MOVE:
       //break;
     case OP_LOADK: //load constant into register
-      luavm_inf("load constant #%u into register %u", bx - 1, a);
-      state->registers[a] = state->constants[bx - 1].data;
+      luavm_inf("load constant #%u into register %u", bx, a);
+      state->registers[a] = state->constants[bx].data;
+      printf("\t\tconst val: %u %f reg val: %u %f\n", state->constants[bx].data, state->constants[bx].data, state->registers[a], state->registers[a]);
+      break;
+    case OP_LOADBOOL:
+      luavm_inf("load constant boolean #%u into register %u (%s)", b, a, c ? "skip" : "no skip");
+      regs[a] = b ? 1.0 : 0.0;
       break;
     case OP_SETGLOBAL: //set global value
-      luavm_inf("set global #%u to value at register %u", bx - 1, a);
-      state->globals[bx - 1].name = bx - 1;
-      state->globals[bx - 1].data = state->registers[a];
+      luavm_inf("set global #%u to value at register %u", bx, a);
+      state->globals[bx].name = bx;
+      state->globals[bx].data = state->registers[a];
       break;
     case OP_GETGLOBAL:
       luavm_inf("load global #%u into register %u", bx, a);
-      state->registers[a] = state->globals[bx - 1].data;
+      printf("\t\t1. value at global: %f at register: %f\n", state->globals[bx].data, state->registers[a]);
+      state->registers[a] = state->globals[bx].data;
+      printf("\t\t2. value at global: %f at register: %f\n", state->globals[bx].data, state->registers[a]);
       break;
     case OP_RETURN:
       luavm_inf("return");
       break;
     case OP_ADD:
-      luavm_inf("add value at register %u and %u, store result in register %u", b, c, a);
-      state->registers[a] = (uint64_t)((double)state->registers[b] + (double)state->registers[c]);
+      luavm_inf("R(%u)=R(%u)+R(%u)", a, b, c);
+      printf("\t\tR(b): %f R(c):%f\n", regs[b], regs[c]);
+      regs[a] = regs[b] + regs[c];
+      printf("\t\tresult: %f\n", state->registers[a]);
+      break;
+    case OP_SUB:
+      luavm_inf("R(%u)=R(%u)-R(%u)", a, b, c);
+      printf("\t\tR(b): %f R(c):%f\n", regs[b], regs[c]);
+      regs[a] = regs[b] - regs[c];
+      printf("\t\tresult: %f\n", state->registers[a]);
+      break;
+    case OP_MUL:
+      luavm_inf("R(%u)=R(%u)*R(%u)", a, b, c);
+      printf("\t\tR(b): %f R(c):%f\n", regs[b], regs[c]);
+      regs[a] = regs[b] * regs[c];
+      printf("\t\tresult: %f\n", state->registers[a]);
+      break;
+    case OP_DIV:
+      luavm_inf("R(%u)=R(%u)/R(%u)", a, b, c);
+      printf("\t\tR(b): %f R(c):%f\n", regs[b], regs[c]);
+      regs[a] = regs[b] / regs[c];
+      printf("\t\tresult: %f\n", state->registers[a]);
+      break;
+    case OP_MOD:
+      luavm_inf("R(%u)=R(%u)%%R(%u)", a, b, c);
+      printf("\t\tR(b): %f R(c):%f\n", regs[b], regs[c]);
+      regs[a] = regs[b] - floor(regs[b]/regs[c])*regs[c];
+      printf("\t\tresult: %f\n", state->registers[a]);
+      break;
+    case OP_POW:
+      luavm_inf("R(%u)=R(%u)^R(%u)", a, b, c);
+      printf("\t\tR(b): %f R(c):%f\n", regs[b], regs[c]);
+      regs[a] = pow(regs[b], regs[c]);
+      printf("\t\tresult: %f\n", state->registers[a]);
+      break;
+    case OP_UNM:
+      luavm_inf("R(%u)=-R(%u)", a, b);
+      printf("\t\tR(b): %f\n", regs[b]);
+      regs[a] = -regs[b];
       printf("\t\tresult: %f\n", state->registers[a]);
       break;
     case OP_CALL:
