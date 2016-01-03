@@ -117,7 +117,7 @@ void luavm_update(uint64_t dt, ep_window* w)
 {
   if(!(w->flags >> 1 & 1)) return;
   luavm_state* s = (luavm_state*)w->userdata[0];
-  uint32_t* instr = (uint32_t*)((uint32_t)s->code_ptr + s->ip);
+  uint32_t* instr = (uint32_t*)((uint32_t)s->code_ptr);
   for(int i = 0; i < dt && ((w->flags >> 1) & 1); i++)
   {
     if(s->ip + i >= s->code_n)
@@ -126,7 +126,7 @@ void luavm_update(uint64_t dt, ep_window* w)
       w->flags &= ~(1 << 1);
       break;
     }
-    luavm_exec(s, instr[i]);
+    luavm_exec(s, instr[s->ip + i]);
   }
   s->ip += dt;
 }
@@ -256,9 +256,18 @@ void luavm_exec(luavm_state* state, uint32_t instruction)
   uint8_t a = LUAVM_A(instruction);
   uint16_t b = LUAVM_B(instruction);
   uint16_t c = LUAVM_C(instruction);
-  uint32_t bx = LUAVM_Bx(instruction);
+  int bx = LUAVM_Bx(instruction);
   double ra = 0.0, rb = 0.0, rc = 0.0;
   double* regs = (double*)state->registers;
+  ra = regs[a];
+  rb = regs[b];
+  rc = regs[c];
+  double ka, kb, kc;
+  if(a > 255) ka = *(double*)(&state->constants[a - 256].data);
+  if(b > 255) kb = *(double*)(&state->constants[b - 256].data);
+  if(c > 255) kc = *(double*)(&state->constants[c - 256].data);
+  double cb = (b > 255) ? kb : rb;
+  double cc = (c > 255) ? kc : rc;
   switch(opcode)
   {
     //case OP_MOVE:
@@ -271,6 +280,7 @@ void luavm_exec(luavm_state* state, uint32_t instruction)
     case OP_LOADBOOL:
       luavm_inf("load constant boolean #%u into register %u (%s)", b, a, c ? "skip" : "no skip");
       regs[a] = b ? 1.0 : 0.0;
+      if(c) state->ip++;
       break;
     case OP_SETGLOBAL: //set global value
       luavm_inf("set global #%u to value at register %u", bx, a);
@@ -287,39 +297,34 @@ void luavm_exec(luavm_state* state, uint32_t instruction)
       luavm_inf("return");
       break;
     case OP_ADD:
-      luavm_inf("R(%u)=R(%u)+R(%u)", a, b, c);
-      printf("\t\tR(b): %f R(c):%f\n", regs[b], regs[c]);
-      regs[a] = regs[b] + regs[c];
+      luavm_inf("R(%u)=RK(%u)+RK(%u)", a, b, c);
+      regs[a] = cb + cc;
       printf("\t\tresult: %f\n", state->registers[a]);
       break;
     case OP_SUB:
-      luavm_inf("R(%u)=R(%u)-R(%u)", a, b, c);
-      printf("\t\tR(b): %f R(c):%f\n", regs[b], regs[c]);
-      regs[a] = regs[b] - regs[c];
+      luavm_inf("R(%u)=RK(%u)-RK(%u)", a, b, c);
+      regs[a] = cb - cc;
       printf("\t\tresult: %f\n", state->registers[a]);
       break;
     case OP_MUL:
-      luavm_inf("R(%u)=R(%u)*R(%u)", a, b, c);
-      printf("\t\tR(b): %f R(c):%f\n", regs[b], regs[c]);
-      regs[a] = regs[b] * regs[c];
+      luavm_inf("R(%u)=RK(%u)*RK(%u)", a, b, c);
+      regs[a] = cb * cc;
       printf("\t\tresult: %f\n", state->registers[a]);
       break;
     case OP_DIV:
-      luavm_inf("R(%u)=R(%u)/R(%u)", a, b, c);
-      printf("\t\tR(b): %f R(c):%f\n", regs[b], regs[c]);
-      regs[a] = regs[b] / regs[c];
+      luavm_inf("R(%u)=RK(%u)/RK(%u)", a, b, c);
+      regs[a] = cb / cc;
       printf("\t\tresult: %f\n", state->registers[a]);
       break;
     case OP_MOD:
-      luavm_inf("R(%u)=R(%u)%%R(%u)", a, b, c);
-      printf("\t\tR(b): %f R(c):%f\n", regs[b], regs[c]);
-      regs[a] = regs[b] - floor(regs[b]/regs[c])*regs[c];
+      luavm_inf("R(%u)=RK(%u)%%RK(%u)", a, b, c);
+      regs[a] = cb - floor(cb/cc)*cc;
       printf("\t\tresult: %f\n", state->registers[a]);
       break;
     case OP_POW:
       luavm_inf("R(%u)=R(%u)^R(%u)", a, b, c);
       printf("\t\tR(b): %f R(c):%f\n", regs[b], regs[c]);
-      regs[a] = pow(regs[b], regs[c]);
+      regs[a] = pow(cb, cc);
       printf("\t\tresult: %f\n", state->registers[a]);
       break;
     case OP_UNM:
@@ -328,12 +333,33 @@ void luavm_exec(luavm_state* state, uint32_t instruction)
       regs[a] = -regs[b];
       printf("\t\tresult: %f\n", state->registers[a]);
       break;
+    case OP_LT:
+      luavm_inf("RK(%u) < RK(%u) != %u", b, c, a);
+      if((cb < cc) != a)
+        state->ip++;
+      break;
+    case OP_LE:
+      luavm_inf("RK(%u) <= RK(%u) != %u", b, c, a);
+      if((cb <= cc) != a)
+        state->ip++;
+      break;
+    case OP_EQ:
+      luavm_inf("RK(%u) == RK(%u) != A", b, c);
+      if((cb == cc) != a) state->ip++;
+      break;
+    case OP_JMP:
+      #ifdef __linux__
+      luavm_inf("JMP %+d", bx - 131071);
+      #else
+      luavm_inf("JMP %d", bx - 131071);
+      #endif /* __linux__ */
+      state->ip +=  bx - 131071;
+      break;
     case OP_CALL:
       luavm_inf("call function at register %d", a);
       if(b == 0) printf("\t\twith an unknown number of parameters\n");
       if(b == 1) printf("\t\twithout parameters\n");
       if(b > 1) printf("\t\twith a number of %d parameters\n", b - 1);
-
       break;
     default:
       luavm_fat("unimplemented opcode %d", opcode);
