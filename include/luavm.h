@@ -1,11 +1,7 @@
 #ifndef H_LUAVM
 #define H_LUAVM
 
-#ifdef __linux__
-#include "eelphant.h"
-#else
-#include <eelphant.h>
-#endif /* __linux__ */
+#include <amethyst.h>
 
 typedef struct luabc_header {
   char signature[4]; //0x1B4C7561
@@ -25,7 +21,7 @@ typedef struct luavm_const{
 } luavm_const;
 
 typedef struct luavm_state {
-  ep_window* window;
+  am_win* window;
   lheader_t* file;
   uint32_t stack[200];
   uint32_t ip;
